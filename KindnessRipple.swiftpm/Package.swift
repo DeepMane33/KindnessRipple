@@ -1,0 +1,37 @@
+// swift-tools-version: 5.9
+import PackageDescription
+import AppleProductTypes
+
+let package = Package(
+    name: "KindnessRipple",
+    platforms: [
+        .iOS("17.0")
+    ],
+    products: [
+        .iOSApplication(
+            name: "KindnessRipple",
+            targets: ["AppModule"],
+            bundleIdentifier: "com.kindness.ripple",
+            displayVersion: "1.0",
+            bundleVersion: "1",
+            appIcon: .placeholder(icon: .heart),
+            accentColor: .presetColor(.pink),
+            supportedDeviceFamilies: [
+                .pad,
+                .phone
+            ],
+            supportedInterfaceOrientations: [
+                .portrait,
+                .landscapeRight,
+                .landscapeLeft,
+                .portraitUpsideDown(.when(deviceFamilies: [.pad]))
+            ]
+        )
+    ],
+    targets: [
+        .executableTarget(
+            name: "AppModule",
+            path: "."
+        )
+    ]
+)
