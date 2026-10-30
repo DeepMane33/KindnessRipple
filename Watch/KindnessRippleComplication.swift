@@ -34,10 +34,10 @@ struct KindnessRippleComplicationView: View {
     let level: RippleLevel
     var body: some View {
         ZStack {
-            Circle().stroke(.white.opacity(0.2), lineWidth: 4)
+            Circle().stroke(Color(red: 0.90, green: 0.87, blue: 0.82).opacity(0.4), lineWidth: 4)
             VStack {
-                Image(systemName: level.icon).font(.caption2)
-                Text("\(totalRipples)").font(.headline).fontDesign(.rounded)
+                Image(systemName: level.icon).font(.caption2).foregroundStyle(Color(red: 0.76, green: 0.84, blue: 0.76))
+                Text("\(totalRipples)").font(.headline).fontDesign(.rounded).foregroundStyle(Color(red: 0.30, green: 0.27, blue: 0.22))
             }
         }
     }

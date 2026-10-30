@@ -121,6 +121,20 @@ struct BadgeDef: Identifiable {
     let icon: String
 }
 
+struct MicroWin: Identifiable, Codable {
+    var id = UUID()
+    var title: String
+    var detail: String
+    var isCompleted: Bool = false
+    var date: Date = Date()
+}
+
+struct GratitudeEntry: Identifiable, Codable {
+    var id = UUID()
+    var text: String
+    var date: Date = Date()
+}
+
 enum AppPhase: Int, CaseIterable {
     case welcome, generator, action, dashboard
     var headline: String {
@@ -242,6 +256,16 @@ final class RippleStore {
     var acts: [KindAct] = []
     var freezeUsedThisWeek: Bool = false
 
+    // 1% Better Every Day
+    var dailyMicroWin: MicroWin?
+    var microWinCompleted: Bool = false
+    var gratitudeEntries: [GratitudeEntry] = []
+    var todayGratitude: String = ""
+
+    // Background music
+    var isMusicPlaying: Bool = false
+    private var audioPlayer: AVAudioPlayer?
+
     // Voice transcription
     var isRecording: Bool = false
     var transcript: String = ""
@@ -254,21 +278,37 @@ final class RippleStore {
     let healthStore = HKHealthStore()
     var healthAuthorized: Bool = false
 
-    init() { load() }
+    init() { load(); ensureMicroWinForToday() }
 
     // Persistence
     private var saveKey: String { "kindness.ripple.v2" }
     func save() {
         do {
-            let data = try JSONEncoder().encode(acts)
-            UserDefaults.standard.set(data, forKey: saveKey)
+            let actsData = try JSONEncoder().encode(acts)
+            UserDefaults.standard.set(actsData, forKey: saveKey)
             UserDefaults.standard.set(inspirationName, forKey: saveKey + ".name")
+            if let mw = dailyMicroWin, let mwData = try? JSONEncoder().encode(mw) {
+                UserDefaults.standard.set(mwData, forKey: saveKey + ".microWin")
+            }
+            UserDefaults.standard.set(microWinCompleted, forKey: saveKey + ".microWinCompleted")
+            if let grData = try? JSONEncoder().encode(gratitudeEntries) {
+                UserDefaults.standard.set(grData, forKey: saveKey + ".gratitude")
+            }
         } catch { /* keep in-memory on encode fail */ }
     }
     func load() {
         if let name = UserDefaults.standard.string(forKey: saveKey + ".name") { inspirationName = name }
         guard let data = UserDefaults.standard.data(forKey: saveKey) else { return }
         if let decoded = try? JSONDecoder().decode([KindAct].self, from: data) { acts = decoded }
+        if let mwData = UserDefaults.standard.data(forKey: saveKey + ".microWin"),
+           let mw = try? JSONDecoder().decode(MicroWin.self, from: mwData) {
+            dailyMicroWin = mw
+        }
+        microWinCompleted = UserDefaults.standard.bool(forKey: saveKey + ".microWinCompleted")
+        if let grData = UserDefaults.standard.data(forKey: saveKey + ".gratitude"),
+           let gr = try? JSONDecoder().decode([GratitudeEntry].self, from: grData) {
+            gratitudeEntries = gr
+        }
     }
 
     var totalRipples: Int { acts.reduce(0) { $0 + $1.points } }
@@ -394,9 +434,76 @@ final class RippleStore {
         refreshChallenge()
     }
 
-    // MARK: Voice
-    func requestSpeechAuthorization() {
-        SFSpeechRecognizer.requestAuthorization { _ in }
+    // MARK: 1% Better Every Day
+    func generateMicroWin() -> MicroWin {
+        let wins: [MicroWin] = [
+            MicroWin(title: "Text someone you appreciate", detail: "Send a quick 'thinking of you' message to one person today.", isCompleted: false),
+            MicroWin(title: "Drink an extra glass of water", detail: "Hydrate your body — one extra glass counts.", isCompleted: false),
+            MicroWin(title: "Take 3 deep breaths", detail: "Pause and breathe slowly three times before your next task.", isCompleted: false),
+            MicroWin(title: "Compliment a stranger", detail: "Say something genuine and kind to someone you don't know.", isCompleted: false),
+            MicroWin(title: "Walk for 10 minutes", detail: "Step outside and notice three beautiful things around you.", isCompleted: false),
+            MicroWin(title: "Write down one win", detail: "Note one small thing you did well today, no matter how tiny.", isCompleted: false),
+            MicroWin(title: "Stretch for 2 minutes", detail: "Reach your arms up, touch your toes, and release tension.", isCompleted: false),
+            MicroWin(title: "Call a loved one", detail: "Have a real conversation — ask how they are and listen.", isCompleted: false)
+        ]
+        let cal = Calendar.current
+        let dayOfYear = cal.ordinality(of: .day, in: .year, for: Date()) ?? 0
+        return wins[dayOfYear % wins.count]
+    }
+
+    func ensureMicroWinForToday() {
+        let cal = Calendar.current
+        let today = cal.startOfDay(for: Date())
+        if let existing = dailyMicroWin, cal.isDate(existing.date, inSameDayAs: today) {
+            return
+        }
+        dailyMicroWin = generateMicroWin()
+        microWinCompleted = dailyMicroWin?.isCompleted ?? false
+        save()
+    }
+
+    func toggleMicroWin() {
+        guard var win = dailyMicroWin else { return }
+        win.isCompleted.toggle()
+        dailyMicroWin = win
+        microWinCompleted = win.isCompleted
+        save()
+    }
+
+    func addGratitude() {
+        let trimmed = todayGratitude.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let entry = GratitudeEntry(text: trimmed, date: Date())
+        gratitudeEntries.append(entry)
+        todayGratitude = ""
+        save()
+    }
+
+    // MARK: Background Music
+    func toggleMusic() {
+        if isMusicPlaying {
+            pauseMusic()
+        } else {
+            playMusic()
+        }
+    }
+
+    func playMusic() {
+        guard let url = Bundle.main.url(forResource: "calm", withExtension: "mp3") else { return }
+        do {
+            audioPlayer = try AVAudioPlayer(contentsOf: url)
+            audioPlayer?.numberOfLoops = -1
+            audioPlayer?.volume = 0.45
+            audioPlayer?.prepareToPlay()
+            audioPlayer?.play()
+            isMusicPlaying = true
+        } catch { isMusicPlaying = false }
+    }
+
+    func pauseMusic() {
+        audioPlayer?.stop()
+        audioPlayer = nil
+        isMusicPlaying = false
     }
 
     func startTranscription() {
@@ -492,7 +599,7 @@ struct ContentView: View {
     @State private var store = RippleStore()
     var body: some View {
         ZStack {
-            LinearGradient(colors: [Color(red: 0.11, green: 0.10, blue: 0.29), Color(red: 0.35, green: 0.27, blue: 0.62), Color(red: 0.77, green: 0.71, blue: 0.99)], startPoint: .topLeading, endPoint: .bottomTrailing)
+            LinearGradient(colors: [Color(red: 0.97, green: 0.95, blue: 0.90), Color(red: 0.94, green: 0.91, blue: 0.85), Color(red: 0.91, green: 0.87, blue: 0.80)], startPoint: .topLeading, endPoint: .bottomTrailing)
                 .ignoresSafeArea()
             VStack(spacing: 0) {
                 PhaseProgressBar(phase: store.phase)
@@ -504,8 +611,12 @@ struct ContentView: View {
                 case .dashboard: DashboardView(store: store)
                 }
             }
+            MusicToggleButton(store: store)
+                .padding(.top, 60)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .padding(.trailing, 24)
         }
-        .tint(.white)
+        .tint(Color(red: 0.76, green: 0.84, blue: 0.76))
     }
 }
 
@@ -514,13 +625,13 @@ struct PhaseProgressBar: View {
     var body: some View {
         VStack(spacing: 6) {
             HStack {
-                Text(phase.headline).font(.caption.weight(.semibold)).foregroundStyle(.white.opacity(0.85))
+                Text(phase.headline).font(.caption.weight(.semibold)).foregroundStyle(Color(red: 0.55, green: 0.50, blue: 0.45))
                     .accessibilityLabel("Progress \(phase.headline)")
                 Spacer()
-                Text("Kindness Ripple").font(.caption.weight(.bold)).foregroundStyle(.white)
+                Text("Kindness Ripple").font(.caption.weight(.bold)).foregroundStyle(Color(red: 0.30, green: 0.27, blue: 0.22))
             }
             ProgressView(value: Double(phase.rawValue + 1), total: 4)
-                .tint(.white).background(.white.opacity(0.25)).clipShape(Capsule())
+                .tint(Color(red: 0.76, green: 0.84, blue: 0.76)).background(Color(red: 0.90, green: 0.87, blue: 0.82)).clipShape(Capsule())
                 .accessibilityHidden(true)
         }
     }
@@ -537,35 +648,35 @@ struct WelcomeView: View {
                 Spacer(minLength: 12)
                 ZStack {
                     ForEach(0..<3, id: \.self) { i in
-                        Circle().stroke(.white.opacity(0.25 - Double(i) * 0.07), lineWidth: 1.5)
+                        Circle().stroke(Color(red: 0.90, green: 0.87, blue: 0.82).opacity(0.4 - Double(i) * 0.1), lineWidth: 1.5)
                             .frame(width: 140 + CGFloat(i) * 55, height: 140 + CGFloat(i) * 55)
                             .scaleEffect(animate ? 1.08 : 0.94)
                             .animation(.easeInOut(duration: 2.5).repeatForever().delay(Double(i) * 0.3), value: animate)
                     }
                     Image(systemName: "heart.circle.fill").font(.system(size: 84))
-                        .foregroundStyle(.white, .pink).shadow(color: .pink.opacity(0.6), radius: 24)
+                        .foregroundStyle(Color(red: 0.92, green: 0.72, blue: 0.75), Color(red: 0.91, green: 0.62, blue: 0.52)).shadow(color: Color(red: 0.91, green: 0.62, blue: 0.52).opacity(0.4), radius: 24)
                         .accessibilityHidden(true)
                 }
-                Text("Kindness Ripple").font(.system(.largeTitle, design: .rounded).weight(.heavy)).foregroundStyle(.white)
+                Text("Kindness Ripple").font(.system(.largeTitle, design: .rounded).weight(.heavy)).foregroundStyle(Color(red: 0.30, green: 0.27, blue: 0.22))
                 Text("Small acts. Big ripples.\nLocal intelligence, measurable warmth.")
-                    .font(.title3.weight(.medium)).multilineTextAlignment(.center).foregroundStyle(.white.opacity(0.9))
+                    .font(.title3.weight(.medium)).multilineTextAlignment(.center).foregroundStyle(Color(red: 0.55, green: 0.50, blue: 0.45))
                 Text("Journal your kindness. On-device AI feels the warmth. Your garden blooms. No accounts. No internet.")
-                    .font(.subheadline).foregroundStyle(.white.opacity(0.75)).multilineTextAlignment(.center).padding(.horizontal, 28)
+                    .font(.subheadline).foregroundStyle(Color(red: 0.65, green: 0.60, blue: 0.55)).multilineTextAlignment(.center).padding(.horizontal, 28)
 
                 WelcomeNameField(store: store)
 
                 Button { store.simulateJudgeExperience() } label: {
                     Label("Simulate Judge Experience ✨", systemImage: "sparkles")
-                        .font(.headline).foregroundStyle(Color(red: 0.2, green: 0.15, blue: 0.4))
-                        .frame(maxWidth: .infinity).padding().background(.white)
+                        .font(.headline).foregroundStyle(Color(red: 0.30, green: 0.27, blue: 0.22))
+                        .frame(maxWidth: .infinity).padding().background(Color(red: 1.0, green: 0.995, blue: 0.97))
                         .clipShape(RoundedRectangle(cornerRadius: 20))
-                        .shadow(color: .black.opacity(0.25), radius: 16, y: 8)
+                        .shadow(color: Color(red: 0.30, green: 0.27, blue: 0.22).opacity(0.15), radius: 16, y: 8)
                 }
                 .padding(.horizontal, 24)
                 .accessibilityHint("Loads sample data to try all features instantly")
 
                 Button { store.phase = .generator } label: {
-                    Text("Start fresh").font(.subheadline.weight(.semibold)).foregroundStyle(.white).padding(10)
+                    Text("Start fresh").font(.subheadline.weight(.semibold)).foregroundStyle(Color(red: 0.76, green: 0.84, blue: 0.76)).padding(10)
                 }
                 Spacer()
             }
@@ -578,18 +689,18 @@ struct WelcomeNameField: View {
     @Bindable var store: RippleStore
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("WHO TAUGHT YOU KINDNESS?").font(.caption.weight(.heavy)).foregroundStyle(.white.opacity(0.7))
+            Text("WHO TAUGHT YOU KINDNESS?").font(.caption.weight(.heavy)).foregroundStyle(Color(red: 0.65, green: 0.60, blue: 0.55))
             TextField("e.g. Grandma Maya", text: $store.inspirationName)
                 .textFieldStyle(.roundedBorder).font(.body)
                 .accessibilityLabel("Who taught you kindness")
                 .onChange(of: store.inspirationName) { _, _ in store.save() }
             if !store.inspirationName.isEmpty {
                 Text("For \(store.inspirationName) — let's grow this together 💛")
-                    .font(.footnote.weight(.semibold)).foregroundStyle(.white)
+                    .font(.footnote.weight(.semibold)).foregroundStyle(Color(red: 0.30, green: 0.27, blue: 0.22))
             }
         }
-        .padding(16).background(.white.opacity(0.12)).clipShape(RoundedRectangle(cornerRadius: 20))
-        .overlay(RoundedRectangle(cornerRadius: 20).stroke(.white.opacity(0.25)))
+        .padding(16).background(Color(red: 1.0, green: 0.995, blue: 0.97).opacity(0.9)).clipShape(RoundedRectangle(cornerRadius: 20))
+        .overlay(RoundedRectangle(cornerRadius: 20).stroke(Color(red: 0.90, green: 0.87, blue: 0.82).opacity(0.6)))
         .padding(.horizontal, 24)
     }
 }
@@ -602,12 +713,12 @@ struct GeneratorView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 Text(store.inspirationName.isEmpty ? "Where are you?" : "Where are you, for \(store.inspirationName)?")
-                    .font(.system(.title, design: .rounded).weight(.bold)).foregroundStyle(.white)
+                    .font(.system(.title, design: .rounded).weight(.bold)).foregroundStyle(Color(red: 0.30, green: 0.27, blue: 0.22))
                     .padding(.horizontal, 20).padding(.top, 12)
                 Text("Pick context + energy. Intelligence crafts a micro-challenge instantly, offline.")
-                    .font(.subheadline).foregroundStyle(.white.opacity(0.8)).padding(.horizontal, 20)
+                    .font(.subheadline).foregroundStyle(Color(red: 0.65, green: 0.60, blue: 0.55)).padding(.horizontal, 20)
 
-                Text("PLACE").font(.caption.weight(.heavy)).foregroundStyle(.white.opacity(0.7)).padding(.horizontal, 20)
+                Text("PLACE").font(.caption.weight(.heavy)).foregroundStyle(Color(red: 0.65, green: 0.60, blue: 0.55)).padding(.horizontal, 20)
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 12) {
                         ForEach(Place.allCases) { p in
@@ -618,11 +729,11 @@ struct GeneratorView: View {
                                     Image(systemName: p.icon).font(.title2)
                                     Text(p.rawValue).font(.caption.weight(.bold)).multilineTextAlignment(.center)
                                 }
-                                .foregroundStyle(store.selectedPlace == p ? Color(red: 0.25, green: 0.18, blue: 0.5) : .white)
+                                .foregroundStyle(store.selectedPlace == p ? Color(red: 0.30, green: 0.27, blue: 0.22) : Color(red: 0.55, green: 0.50, blue: 0.45))
                                 .frame(width: 110, height: 92)
-                                .background(store.selectedPlace == p ? .white : .white.opacity(0.15))
+                                .background(store.selectedPlace == p ? Color(red: 1.0, green: 0.995, blue: 0.97) : Color(red: 1.0, green: 1.0, blue: 1.0).opacity(0.5))
                                 .clipShape(RoundedRectangle(cornerRadius: 20))
-                                .overlay(RoundedRectangle(cornerRadius: 20).stroke(.white.opacity(0.4), lineWidth: 1))
+                                .overlay(RoundedRectangle(cornerRadius: 20).stroke(Color(red: 0.90, green: 0.87, blue: 0.82).opacity(0.6), lineWidth: 1))
                             }
                             .accessibilityLabel(p.rawValue)
                             .accessibilityAddTraits(store.selectedPlace == p ? .isSelected : [])
@@ -630,7 +741,7 @@ struct GeneratorView: View {
                     }.padding(.horizontal, 20)
                 }
 
-                Text("ENERGY").font(.caption.weight(.heavy)).foregroundStyle(.white.opacity(0.7)).padding(.horizontal, 20)
+                Text("ENERGY").font(.caption.weight(.heavy)).foregroundStyle(Color(red: 0.65, green: 0.60, blue: 0.55)).padding(.horizontal, 20)
                 HStack(spacing: 10) {
                     ForEach(Energy.allCases) { e in
                         Button {
@@ -641,9 +752,9 @@ struct GeneratorView: View {
                                 Text(e.rawValue).font(.caption.weight(.bold))
                                 Text(e.hint).font(.caption2).opacity(0.7).multilineTextAlignment(.center)
                             }
-                            .foregroundStyle(store.selectedEnergy == e ? Color(red: 0.25, green: 0.18, blue: 0.5) : .white)
+                            .foregroundStyle(store.selectedEnergy == e ? Color(red: 0.30, green: 0.27, blue: 0.22) : Color(red: 0.55, green: 0.50, blue: 0.45))
                             .frame(maxWidth: .infinity).padding(.vertical, 10)
-                            .background(store.selectedEnergy == e ? .white : .white.opacity(0.15))
+                            .background(store.selectedEnergy == e ? Color(red: 1.0, green: 0.995, blue: 0.97) : Color(red: 1.0, green: 1.0, blue: 1.0).opacity(0.5))
                             .clipShape(RoundedRectangle(cornerRadius: 16))
                         }
                         .accessibilityLabel("Energy \(e.rawValue), \(e.hint)")
@@ -651,7 +762,7 @@ struct GeneratorView: View {
                 }.padding(.horizontal, 20)
 
                 HStack {
-                    Text("TIME").font(.caption.weight(.heavy)).foregroundStyle(.white.opacity(0.7))
+                    Text("TIME").font(.caption.weight(.heavy)).foregroundStyle(Color(red: 0.65, green: 0.60, blue: 0.55))
                     Spacer()
                     Picker("Minutes", selection: $store.selectedMinutes) {
                         Text("1 min").tag(1); Text("2-5 min").tag(2); Text("15 min").tag(15)
@@ -662,38 +773,38 @@ struct GeneratorView: View {
 
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
-                        Image(systemName: "cpu").foregroundStyle(.pink)
-                        Text("LOCAL INTELLIGENCE").font(.caption.weight(.heavy)).foregroundStyle(.pink)
+                        Image(systemName: "cpu").foregroundStyle(Color(red: 0.92, green: 0.72, blue: 0.75))
+                        Text("LOCAL INTELLIGENCE").font(.caption.weight(.heavy)).foregroundStyle(Color(red: 0.92, green: 0.72, blue: 0.75))
                         Spacer()
                         Text("\(store.currentChallenge.minutes) min • +\(store.currentChallenge.ripplePoints)")
-                            .font(.caption.weight(.bold)).foregroundStyle(.secondary)
+                            .font(.caption.weight(.bold)).foregroundStyle(Color(red: 0.65, green: 0.60, blue: 0.55))
                     }
-                    Text(store.currentChallenge.title).font(.system(.title2, design: .rounded).weight(.heavy))
-                    Text(store.currentChallenge.detail).font(.body).foregroundStyle(.secondary)
+                    Text(store.currentChallenge.title).font(.system(.title2, design: .rounded).weight(.heavy)).foregroundStyle(Color(red: 0.30, green: 0.27, blue: 0.22))
+                    Text(store.currentChallenge.detail).font(.body).foregroundStyle(Color(red: 0.65, green: 0.60, blue: 0.55))
                     Text("Tip: \(funFacts[store.acts.count % funFacts.count])")
-                        .font(.caption).foregroundStyle(.secondary).padding(8)
-                        .background(Color(.systemGray6)).clipShape(RoundedRectangle(cornerRadius: 10))
+                        .font(.caption).foregroundStyle(Color(red: 0.65, green: 0.60, blue: 0.55)).padding(8)
+                        .background(Color(red: 0.97, green: 0.95, blue: 0.90)).clipShape(RoundedRectangle(cornerRadius: 10))
                     HStack(spacing: 10) {
                         Button { store.phase = .action } label: {
                             Label("Do this kindness", systemImage: "arrow.right.heart.fill")
                                 .font(.headline).foregroundStyle(.white).frame(maxWidth: .infinity).padding()
-                                .background(LinearGradient(colors: [.pink, .orange], startPoint: .leading, endPoint: .trailing))
+                                .background(LinearGradient(colors: [Color(red: 0.91, green: 0.62, blue: 0.52), Color(red: 0.93, green: 0.80, blue: 0.58)], startPoint: .leading, endPoint: .trailing))
                                 .clipShape(RoundedRectangle(cornerRadius: 18))
                         }
                         Button { store.refreshChallenge() } label: {
-                            Image(systemName: "arrow.triangle.2.circlepath").font(.title2).foregroundStyle(.primary)
-                                .padding().background(.ultraThinMaterial).clipShape(Circle())
+                            Image(systemName: "arrow.triangle.2.circlepath").font(.title2).foregroundStyle(Color(red: 0.30, green: 0.27, blue: 0.22))
+                                .padding().background(Color(red: 1.0, green: 0.995, blue: 0.97)).clipShape(Circle())
                         }
                         .accessibilityLabel("New challenge")
                     }
                 }
-                .padding(20).background(.white).clipShape(RoundedRectangle(cornerRadius: 28))
-                .shadow(color: .black.opacity(0.25), radius: 20, y: 10)
+                .padding(20).background(Color(red: 1.0, green: 0.995, blue: 0.97)).clipShape(RoundedRectangle(cornerRadius: 28))
+                .shadow(color: Color(red: 0.30, green: 0.27, blue: 0.22).opacity(0.12), radius: 20, y: 10)
                 .padding(.horizontal, 20)
 
                 Button { store.phase = .dashboard } label: {
                     Label("Skip to Garden Dashboard", systemImage: "chart.xyaxis.line")
-                        .font(.footnote.weight(.semibold)).foregroundStyle(.white.opacity(0.9))
+                        .font(.footnote.weight(.semibold)).foregroundStyle(Color(red: 0.65, green: 0.60, blue: 0.55))
                 }.frame(maxWidth: .infinity).padding(.bottom, 20)
             }
         }
@@ -709,27 +820,50 @@ struct ActionView: View {
             VStack(spacing: 16) {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("ACTIVE CHALLENGE • \(store.selectedPlace.rawValue.uppercased()) • \(store.selectedEnergy.rawValue.uppercased())")
-                        .font(.caption.weight(.heavy)).foregroundStyle(.white.opacity(0.7))
-                    Text(store.currentChallenge.title).font(.system(.title, design: .rounded).weight(.bold)).foregroundStyle(.white)
-                    Text(store.currentChallenge.detail).foregroundStyle(.white.opacity(0.85))
+                        .font(.caption.weight(.heavy)).foregroundStyle(Color(red: 0.65, green: 0.60, blue: 0.55))
+                    Text(store.currentChallenge.title).font(.system(.title, design: .rounded).weight(.bold)).foregroundStyle(Color(red: 0.30, green: 0.27, blue: 0.22))
+                    Text(store.currentChallenge.detail).foregroundStyle(Color(red: 0.65, green: 0.60, blue: 0.55))
                 }
                 .frame(maxWidth: .infinity, alignment: .leading).padding(20)
-                .background(.white.opacity(0.15)).clipShape(RoundedRectangle(cornerRadius: 24))
-                .overlay(RoundedRectangle(cornerRadius: 24).stroke(.white.opacity(0.3), lineWidth: 1))
+                .background(Color(red: 1.0, green: 0.995, blue: 0.97)).clipShape(RoundedRectangle(cornerRadius: 24))
+                .overlay(RoundedRectangle(cornerRadius: 24).stroke(Color(red: 0.90, green: 0.87, blue: 0.82).opacity(0.6), lineWidth: 1))
                 .padding(.horizontal, 20).padding(.top, 12)
 
                 SentimentBloomView(score: store.sentiment).frame(height: 200).padding(.horizontal, 20)
 
+                // Daily Micro-Win (1% better)
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text("Today's 1% Win").font(.headline).foregroundStyle(Color(red: 0.30, green: 0.27, blue: 0.22))
+                        Spacer()
+                        if let win = store.dailyMicroWin {
+                            Button { store.toggleMicroWin() } label: {
+                                Image(systemName: store.microWinCompleted ? "checkmark.circle.fill" : "circle")
+                                    .font(.title2)
+                                    .foregroundStyle(store.microWinCompleted ? Color(red: 0.76, green: 0.84, blue: 0.76) : Color(red: 0.90, green: 0.87, blue: 0.82))
+                            }
+                            .accessibilityLabel(store.microWinCompleted ? "Micro-win completed" : "Mark micro-win complete")
+                        }
+                    }
+                    if let win = store.dailyMicroWin {
+                        Text(win.title).font(.subheadline.weight(.semibold)).foregroundStyle(Color(red: 0.30, green: 0.27, blue: 0.22))
+                        Text(win.detail).font(.caption).foregroundStyle(Color(red: 0.65, green: 0.60, blue: 0.55))
+                    }
+                }
+                .padding(16).background(Color(red: 1.0, green: 0.995, blue: 0.97)).clipShape(RoundedRectangle(cornerRadius: 20))
+                .overlay(RoundedRectangle(cornerRadius: 20).stroke(Color(red: 0.90, green: 0.87, blue: 0.82).opacity(0.4)))
+                .padding(.horizontal, 20)
+
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
-                        Text("Journal it to track it").font(.headline)
+                        Text("Journal it to track it").font(.headline).foregroundStyle(Color(red: 0.30, green: 0.27, blue: 0.22))
                         Spacer()
                         SentimentBadge(score: store.sentiment)
                     }
                     TextEditor(text: $store.reflection)
                         .frame(minHeight: 110).scrollContentBackground(.hidden)
-                        .padding(12).background(Color(.systemGray6)).clipShape(RoundedRectangle(cornerRadius: 16))
-                        .overlay(RoundedRectangle(cornerRadius: 16).stroke(.gray.opacity(0.2)))
+                        .padding(12).background(Color(red: 1.0, green: 0.995, blue: 0.97)).clipShape(RoundedRectangle(cornerRadius: 16))
+                        .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color(red: 0.90, green: 0.87, blue: 0.82).opacity(0.6)))
                         .accessibilityLabel("Kindness reflection")
                         .accessibilityHint("Write what you did and how it felt")
                         .onChange(of: store.reflection) { _, _ in store.updateSentiment() }
@@ -737,7 +871,7 @@ struct ActionView: View {
                         HStack {
                             ForEach(store.keywords, id: \.self) { k in
                                 Text("#\(k)").font(.caption.weight(.bold)).padding(.horizontal, 10).padding(.vertical, 5)
-                                    .background(Color.pink.opacity(0.12)).foregroundStyle(.pink).clipShape(Capsule())
+                                    .background(Color(red: 0.92, green: 0.72, blue: 0.75).opacity(0.15)).foregroundStyle(Color(red: 0.92, green: 0.72, blue: 0.75)).clipShape(Capsule())
                             }
                         }.accessibilityLabel("Detected keywords: \(store.keywords.joined(separator: ", "))")
                     }
@@ -748,9 +882,9 @@ struct ActionView: View {
                         } label: {
                             Image(systemName: store.isRecording ? "mic.fill" : "mic")
                                 .font(.title2)
-                                .foregroundStyle(store.isRecording ? .red : .primary)
+                                .foregroundStyle(store.isRecording ? Color(red: 0.91, green: 0.62, blue: 0.52) : Color(red: 0.30, green: 0.27, blue: 0.22))
                                 .frame(width: 44, height: 44)
-                                .background(store.isRecording ? .red.opacity(0.15) : .white.opacity(0.15))
+                                .background(store.isRecording ? Color(red: 0.91, green: 0.62, blue: 0.52).opacity(0.15) : Color(red: 1.0, green: 0.995, blue: 0.97))
                                 .clipShape(Circle())
                                 .scaleEffect(store.isRecording ? 1.1 : 1.0)
                                 .animation(.easeInOut(duration: 0.6).repeatForever(), value: store.isRecording)
@@ -758,15 +892,32 @@ struct ActionView: View {
                         .accessibilityLabel(store.isRecording ? "Stop voice transcription" : "Start voice transcription")
                         if !store.transcript.isEmpty {
                             Text(store.transcript)
-                                .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                                .font(.caption).foregroundStyle(Color(red: 0.65, green: 0.60, blue: 0.55)).lineLimit(2)
                                 .padding(.leading, 8)
                         }
                         Spacer()
                         Text(store.isRecording ? "Listening…" : "Voice log")
-                            .font(.caption2).foregroundStyle(.secondary)
+                            .font(.caption2).foregroundStyle(Color(red: 0.65, green: 0.60, blue: 0.55))
                     }
                     Text("Try: “I held the door for a classmate today and they smiled, which made my morning feel much brighter!”")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(Color(red: 0.65, green: 0.60, blue: 0.55))
+
+                    // Three Good Things gratitude
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Three good things today 🌿").font(.subheadline.weight(.semibold)).foregroundStyle(Color(red: 0.30, green: 0.27, blue: 0.22))
+                        TextField("What went well today?", text: $store.todayGratitude, axis: .vertical)
+                            .textFieldStyle(.roundedBorder)
+                            .lineLimit(3...6)
+                            .foregroundStyle(Color(red: 0.30, green: 0.27, blue: 0.22))
+                        Button("Add to gratitude journal") { store.addGratitude() }
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .frame(maxWidth: .infinity).padding(.vertical, 8)
+                            .background(store.todayGratitude.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Color(red: 0.90, green: 0.87, blue: 0.82) : Color(red: 0.76, green: 0.84, blue: 0.76))
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                    }
+                    .padding(14).background(Color(red: 1.0, green: 0.995, blue: 0.97)).clipShape(RoundedRectangle(cornerRadius: 16))
+                    .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color(red: 0.90, green: 0.87, blue: 0.82).opacity(0.4)))
 
                     Button {
                         store.logCurrentAct()
@@ -779,11 +930,11 @@ struct ActionView: View {
                     }
                     .disabled(store.reflection.trimmingCharacters(in: .whitespaces).isEmpty)
                     Button { store.phase = .generator } label: {
-                        Text("← Change challenge").font(.footnote).foregroundStyle(.secondary)
+                        Text("← Change challenge").font(.footnote).foregroundStyle(Color(red: 0.65, green: 0.60, blue: 0.55))
                     }
                 }
-                .padding(20).background(.white).clipShape(RoundedRectangle(cornerRadius: 28))
-                .shadow(color: .black.opacity(0.25), radius: 20, y: 10)
+                .padding(20).background(Color(red: 1.0, green: 0.995, blue: 0.97)).clipShape(RoundedRectangle(cornerRadius: 28))
+                .shadow(color: Color(red: 0.30, green: 0.27, blue: 0.22).opacity(0.12), radius: 20, y: 10)
                 .padding(.horizontal, 20).padding(.bottom, 20)
             }
         }
@@ -792,8 +943,22 @@ struct ActionView: View {
     }
     @ViewBuilder
     func buttonFill(disabled: Bool) -> some View {
-        if disabled { Color.gray }
-        else { LinearGradient(colors: [.pink, .orange], startPoint: .leading, endPoint: .trailing) }
+        if disabled { Color(red: 0.90, green: 0.87, blue: 0.82) }
+        else { LinearGradient(colors: [Color(red: 0.91, green: 0.62, blue: 0.52), Color(red: 0.93, green: 0.80, blue: 0.58)], startPoint: .leading, endPoint: .trailing) }
+    }
+}
+
+// Music toggle button (floating)
+struct MusicToggleButton: View {
+    @Bindable var store: RippleStore
+    var body: some View {
+        Button { store.toggleMusic() } label: {
+            Image(systemName: store.isMusicPlaying ? "pause.circle.fill" : "play.circle.fill")
+                .font(.system(size: 44))
+                .foregroundStyle(store.isMusicPlaying ? Color(red: 0.91, green: 0.62, blue: 0.52) : Color(red: 0.76, green: 0.84, blue: 0.76))
+                .shadow(color: Color(red: 0.30, green: 0.27, blue: 0.22).opacity(0.2), radius: 8, y: 4)
+        }
+        .accessibilityLabel(store.isMusicPlaying ? "Pause music" : "Play calming music")
     }
 }
 
@@ -812,15 +977,15 @@ struct SentimentBloomView: View {
     }
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 24).fill(.white.opacity(0.12))
-            Circle().fill(.gray.opacity(0.35 * (1 - t))).frame(width: 140, height: 140).blur(radius: 30)
-            Circle().fill(Color(red: 1, green: 0.75, blue: 0.35).opacity(0.75 * t))
+            RoundedRectangle(cornerRadius: 24).fill(Color(red: 1.0, green: 0.995, blue: 0.97))
+            Circle().fill(Color(red: 0.90, green: 0.87, blue: 0.82).opacity(0.35 * (1 - t))).frame(width: 140, height: 140).blur(radius: 30)
+            Circle().fill(Color(red: 0.93, green: 0.80, blue: 0.58).opacity(0.75 * t))
                 .frame(width: 90 + 90 * t, height: 90 + 90 * t).blur(radius: 28)
-            Circle().fill(Color(red: 1, green: 0.62, blue: 0.72).opacity(0.7 * t))
+            Circle().fill(Color(red: 0.92, green: 0.72, blue: 0.75).opacity(0.7 * t))
                 .frame(width: 60 + 70 * t, height: 60 + 70 * t).blur(radius: 22).offset(x: 30 * t, y: -20 * t)
             if !reduceMotion {
                 ForEach(0..<Int(10 + 22 * t), id: \.self) { i in
-                    Circle().fill(.white.opacity(0.35 + 0.55 * t))
+                    Circle().fill(Color(red: 1.0, green: 0.995, blue: 0.97).opacity(0.35 + 0.55 * t))
                         .frame(width: 3 + 5 * t, height: 3 + 5 * t)
                         .offset(x: cos(Double(i) * 2.4) * (50 + 45 * t), y: sin(Double(i) * 2.4) * (40 + 35 * t))
                         .blur(radius: 0.5).opacity(shimmer ? 1 : 0.4)
@@ -828,12 +993,12 @@ struct SentimentBloomView: View {
                 }
             }
             VStack(spacing: 4) {
-                Text(String(format: "%.2f", score)).font(.system(.title, design: .rounded).weight(.heavy)).foregroundStyle(.white)
-                Text(mood).font(.caption.weight(.bold)).foregroundStyle(.white.opacity(0.9))
-                Text("on-device NLTagger.sentimentScore").font(.caption2).foregroundStyle(.white.opacity(0.6))
+                Text(String(format: "%.2f", score)).font(.system(.title, design: .rounded).weight(.heavy)).foregroundStyle(Color(red: 0.30, green: 0.27, blue: 0.22))
+                Text(mood).font(.caption.weight(.bold)).foregroundStyle(Color(red: 0.55, green: 0.50, blue: 0.45))
+                Text("on-device NLTagger.sentimentScore").font(.caption2).foregroundStyle(Color(red: 0.65, green: 0.60, blue: 0.55))
             }
         }
-        .overlay(RoundedRectangle(cornerRadius: 24).stroke(.white.opacity(0.3), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 24).stroke(Color(red: 0.90, green: 0.87, blue: 0.82).opacity(0.5), lineWidth: 1))
         .onAppear { shimmer = true }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Warmth meter")
@@ -846,7 +1011,8 @@ struct SentimentBadge: View {
     var body: some View {
         Text(score >= 0.6 ? "💛 Radiant" : score >= 0.2 ? "🧡 Warm" : score > -0.2 ? "🤍 Neutral" : "💙 Reflective")
             .font(.caption.weight(.bold)).padding(.horizontal, 12).padding(.vertical, 6)
-            .background(.ultraThinMaterial).clipShape(Capsule())
+            .background(Color(red: 1.0, green: 0.995, blue: 0.97)).clipShape(Capsule())
+            .overlay(Capsule().stroke(Color(red: 0.90, green: 0.87, blue: 0.82).opacity(0.5)))
             .accessibilityLabel("Mood \(score >= 0.6 ? "Radiant" : score >= 0.2 ? "Warm" : "Neutral")")
     }
 }
@@ -861,78 +1027,79 @@ struct DashboardView: View {
         ScrollView {
             VStack(spacing: 16) {
                 Text(store.inspirationName.isEmpty ? "You did it! 🎉" : "For \(store.inspirationName) — you did it! 🎉")
-                    .font(.system(.largeTitle, design: .rounded).weight(.heavy)).foregroundStyle(.white)
+                    .font(.system(.largeTitle, design: .rounded).weight(.heavy)).foregroundStyle(Color(red: 0.30, green: 0.27, blue: 0.22))
                     .multilineTextAlignment(.center).padding(.horizontal, 20).padding(.top, 8)
                 Text("In 3 minutes you turned small acts into a living garden — all offline, all yours.")
-                    .foregroundStyle(.white.opacity(0.85)).multilineTextAlignment(.center).padding(.horizontal, 28)
+                    .foregroundStyle(Color(red: 0.65, green: 0.60, blue: 0.55)).multilineTextAlignment(.center).padding(.horizontal, 28)
                     .accessibilityLabel("Celebration message")
 
                 // Level
                 HStack(spacing: 12) {
-                    Image(systemName: store.level.icon).font(.title).foregroundStyle(.white)
-                        .frame(width: 52, height: 52).background(.white.opacity(0.2)).clipShape(Circle())
+                    Image(systemName: store.level.icon).font(.title).foregroundStyle(Color(red: 0.76, green: 0.84, blue: 0.76))
+                        .frame(width: 52, height: 52).background(Color(red: 1.0, green: 0.995, blue: 0.97)).clipShape(Circle())
                     VStack(alignment: .leading) {
-                        Text("Level: \(store.level.title)").font(.headline).foregroundStyle(.white)
+                        Text("Level: \(store.level.title)").font(.headline).foregroundStyle(Color(red: 0.30, green: 0.27, blue: 0.22))
                         if store.nextLevelNeed > 0 {
-                            Text("\(store.nextLevelNeed) pts to next level").font(.caption).foregroundStyle(.white.opacity(0.8))
+                            Text("\(store.nextLevelNeed) pts to next level").font(.caption).foregroundStyle(Color(red: 0.65, green: 0.60, blue: 0.55))
                             ProgressView(value: Double(store.totalRipples), total: Double(store.totalRipples + store.nextLevelNeed))
-                                .tint(.yellow).background(.white.opacity(0.3)).clipShape(Capsule()).frame(width: 180)
-                        } else { Text("Max level — Ocean keeper 🌊").font(.caption).foregroundStyle(.white) }
+                                .tint(Color(red: 0.93, green: 0.80, blue: 0.58)).background(Color(red: 0.90, green: 0.87, blue: 0.82)).clipShape(Capsule()).frame(width: 180)
+                        } else { Text("Max level — Ocean keeper 🌊").font(.caption).foregroundStyle(Color(red: 0.65, green: 0.60, blue: 0.55)) }
                     }
                     Spacer()
-                    VStack { Text("\(store.totalRipples)").font(.title.weight(.heavy)).foregroundStyle(.yellow); Text("ripples").font(.caption).foregroundStyle(.white.opacity(0.8)) }
+                    VStack { Text("\(store.totalRipples)").font(.title.weight(.heavy)).foregroundStyle(Color(red: 0.93, green: 0.80, blue: 0.58)); Text("ripples").font(.caption).foregroundStyle(Color(red: 0.65, green: 0.60, blue: 0.55)) }
                 }
-                .padding(16).background(.white.opacity(0.14)).clipShape(RoundedRectangle(cornerRadius: 22))
-                .overlay(RoundedRectangle(cornerRadius: 22).stroke(.white.opacity(0.25)))
+                .padding(16).background(Color(red: 1.0, green: 0.995, blue: 0.97)).clipShape(RoundedRectangle(cornerRadius: 22))
+                .overlay(RoundedRectangle(cornerRadius: 22).stroke(Color(red: 0.90, green: 0.87, blue: 0.82).opacity(0.5)))
                 .padding(.horizontal, 20)
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel("Level \(store.level.title), \(store.totalRipples) ripple points")
 
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
-                    StatCard(value: "\(store.acts.count)", label: "Kind acts", icon: "heart.fill", color: .pink)
-                    StatCard(value: "\(store.streakDays)d", label: "Streak + freeze", icon: "flame.fill", color: .orange)
-                    StatCard(value: String(format: "%.2f", store.avgPositivity), label: "Avg warmth", icon: "sparkles", color: .yellow)
+                    StatCard(value: "\(store.acts.count)", label: "Kind acts", icon: "heart.fill", color: Color(red: 0.92, green: 0.72, blue: 0.75))
+                    StatCard(value: "\(store.streakDays)d", label: "Streak + freeze", icon: "flame.fill", color: Color(red: 0.93, green: 0.80, blue: 0.58))
+                    StatCard(value: String(format: "%.2f", store.avgPositivity), label: "Avg warmth", icon: "sparkles", color: Color(red: 0.76, green: 0.84, blue: 0.76))
                 }.padding(.horizontal, 20)
 
                 // Animated ripple pond
                 RipplePondView(acts: store.acts)
                     .padding(.horizontal, 20)
 
-                // Chart
+                // Warmth trend chart (1% better every day)
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("Kindness Streak & Community Happiness").font(.headline)
+                    Text("Your warmth over the last 7 days").font(.headline).foregroundStyle(Color(red: 0.30, green: 0.27, blue: 0.22))
                         .accessibilityHeading(.h2)
                     Chart(store.happinessSeries) { p in
                         BarMark(x: .value("Day", p.label), y: .value("Acts", p.count))
-                            .foregroundStyle(LinearGradient(colors: [.pink, .orange], startPoint: .top, endPoint: .bottom))
+                            .foregroundStyle(LinearGradient(colors: [Color(red: 0.92, green: 0.72, blue: 0.75), Color(red: 0.93, green: 0.80, blue: 0.58)], startPoint: .top, endPoint: .bottom))
                             .cornerRadius(6)
-                        LineMark(x: .value("Day", p.label), y: .value("Happiness", p.happiness))
-                            .foregroundStyle(.purple).lineStyle(StrokeStyle(lineWidth: 3, lineCap: .round))
+                        LineMark(x: .value("Day", p.label), y: .value("Warmth", p.happiness / 50))
+                            .foregroundStyle(Color(red: 0.76, green: 0.84, blue: 0.76)).lineStyle(StrokeStyle(lineWidth: 3, lineCap: .round))
                             .symbol(Circle().strokeBorder(lineWidth: 2)).symbolSize(40)
                     }
                     .frame(height: 200)
-                    .accessibilityLabel("Bar and line chart of last 7 days kindness and happiness")
-                    Text(store.weeklySummary).font(.caption).foregroundStyle(.secondary)
+                    .accessibilityLabel("Bar and line chart of last 7 days kindness and warmth")
+                    Text(store.weeklySummary).font(.caption).foregroundStyle(Color(red: 0.65, green: 0.60, blue: 0.55))
                     Text("Avg positivity \(String(format: "%.2f", store.avgPositivity)) • Charts + NaturalLanguage, offline")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(Color(red: 0.65, green: 0.60, blue: 0.55))
                 }
-                .padding(20).background(.white).clipShape(RoundedRectangle(cornerRadius: 28)).padding(.horizontal, 20)
+                .padding(20).background(Color(red: 1.0, green: 0.995, blue: 0.97)).clipShape(RoundedRectangle(cornerRadius: 28)).padding(.horizontal, 20)
 
                 // Badges
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("Badges 🏅").font(.headline).foregroundStyle(.white).padding(.horizontal, 20)
+                    Text("Badges 🏅").font(.headline).foregroundStyle(Color(red: 0.30, green: 0.27, blue: 0.22)).padding(.horizontal, 20)
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 100))], spacing: 10) {
                         ForEach(Array(store.badges.enumerated()), id: \.offset) { _, pair in
                             let def = pair.0; let earned = pair.1
                             VStack(spacing: 6) {
-                                Image(systemName: def.icon).font(.title2).foregroundStyle(earned ? .yellow : .white.opacity(0.4))
-                                Text(def.name).font(.caption.weight(.bold)).foregroundStyle(.white).multilineTextAlignment(.center)
-                                Text(def.detail).font(.caption2).foregroundStyle(.white.opacity(0.6)).multilineTextAlignment(.center)
+                                Image(systemName: def.icon).font(.title2).foregroundStyle(earned ? Color(red: 0.93, green: 0.80, blue: 0.58) : Color(red: 0.90, green: 0.87, blue: 0.82).opacity(0.5))
+                                Text(def.name).font(.caption.weight(.bold)).foregroundStyle(Color(red: 0.30, green: 0.27, blue: 0.22)).multilineTextAlignment(.center)
+                                Text(def.detail).font(.caption2).foregroundStyle(Color(red: 0.65, green: 0.60, blue: 0.55)).multilineTextAlignment(.center)
                             }
                             .frame(maxWidth: .infinity).padding(10)
-                            .background(earned ? .white.opacity(0.22) : .white.opacity(0.08))
+                            .background(earned ? Color(red: 1.0, green: 0.995, blue: 0.97) : Color(red: 1.0, green: 0.995, blue: 0.97).opacity(0.4))
+                            .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color(red: 0.90, green: 0.87, blue: 0.82).opacity(0.4)))
                             .clipShape(RoundedRectangle(cornerRadius: 16))
-                            .opacity(earned ? 1 : 0.7)
+                            .opacity(earned ? 1 : 0.5)
                             .accessibilityLabel("\(def.name), \(earned ? "earned" : "locked")")
                         }
                     }.padding(.horizontal, 20)
@@ -941,29 +1108,30 @@ struct DashboardView: View {
                 // Ripples list
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
-                        Text("Your ripples 💧").font(.headline).foregroundStyle(.white)
+                        Text("Your ripples 💧").font(.headline).foregroundStyle(Color(red: 0.30, green: 0.27, blue: 0.22))
                         Spacer()
-                        Button("Clear") { store.resetAll() }.font(.caption).foregroundStyle(.white.opacity(0.7))
+                        Button("Clear") { store.resetAll() }.font(.caption).foregroundStyle(Color(red: 0.65, green: 0.60, blue: 0.55))
                             .accessibilityLabel("Clear all data")
                     }.padding(.horizontal, 20)
                     ForEach(Array(store.acts.reversed())) { act in
                         HStack(spacing: 12) {
-                            Image(systemName: act.place.icon).foregroundStyle(.white)
-                                .frame(width: 40, height: 40).background(.white.opacity(0.2)).clipShape(Circle())
+                            Image(systemName: act.place.icon).foregroundStyle(Color(red: 0.92, green: 0.72, blue: 0.75))
+                                .frame(width: 40, height: 40).background(Color(red: 1.0, green: 0.995, blue: 0.97)).clipShape(Circle())
+                                .overlay(Circle().stroke(Color(red: 0.90, green: 0.87, blue: 0.82).opacity(0.4)))
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(act.title).font(.subheadline.weight(.bold)).foregroundStyle(.white)
-                                Text(act.reflection).font(.caption).foregroundStyle(.white.opacity(0.75)).lineLimit(2)
+                                Text(act.title).font(.subheadline.weight(.bold)).foregroundStyle(Color(red: 0.30, green: 0.27, blue: 0.22))
+                                Text(act.reflection).font(.caption).foregroundStyle(Color(red: 0.65, green: 0.60, blue: 0.55)).lineLimit(2)
                                 Text("\(act.place.rawValue) • \(act.energy.rawValue) • \(act.minutes)m • \(act.keywords.prefix(2).map { "#\($0)" }.joined(separator: " "))")
-                                    .font(.caption2).foregroundStyle(.white.opacity(0.6))
+                                    .font(.caption2).foregroundStyle(Color(red: 0.65, green: 0.60, blue: 0.55))
                             }
                             Spacer()
                             VStack {
-                                Text("+\(act.points)").font(.caption.weight(.heavy)).foregroundStyle(.yellow)
-                                Text(String(format: "%.2f", act.sentiment)).font(.caption2).foregroundStyle(.white.opacity(0.7))
+                                Text("+\(act.points)").font(.caption.weight(.heavy)).foregroundStyle(Color(red: 0.93, green: 0.80, blue: 0.58))
+                                Text(String(format: "%.2f", act.sentiment)).font(.caption2).foregroundStyle(Color(red: 0.65, green: 0.60, blue: 0.55))
                             }
                         }
-                        .padding(12).background(.white.opacity(0.12)).clipShape(RoundedRectangle(cornerRadius: 18))
-                        .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.2)))
+                        .padding(12).background(Color(red: 1.0, green: 0.995, blue: 0.97)).clipShape(RoundedRectangle(cornerRadius: 18))
+                        .overlay(RoundedRectangle(cornerRadius: 18).stroke(Color(red: 0.90, green: 0.87, blue: 0.82).opacity(0.4)))
                         .padding(.horizontal, 20)
                     }
                 }
@@ -971,15 +1139,16 @@ struct DashboardView: View {
                 // Thank-you card with Pencil
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Thank-you card for \(store.inspirationName.isEmpty ? "someone kind" : store.inspirationName) ✏️")
-                        .font(.headline).foregroundStyle(.white).padding(.horizontal, 20)
+                        .font(.headline).foregroundStyle(Color(red: 0.30, green: 0.27, blue: 0.22)).padding(.horizontal, 20)
                     PencilCanvas(canvas: $canvas)
                         .frame(height: 180).clipShape(RoundedRectangle(cornerRadius: 20)).padding(.horizontal, 20)
                     HStack {
-                        Button("Clear drawing") { canvas.drawing = PKDrawing() }.font(.caption).foregroundStyle(.white.opacity(0.8))
+                        Button("Clear drawing") { canvas.drawing = PKDrawing() }.font(.caption).foregroundStyle(Color(red: 0.65, green: 0.60, blue: 0.55))
                         Spacer()
                         Button { showCard.toggle() } label: {
-                            Label("Preview card", systemImage: "eye.fill").font(.caption.weight(.bold)).foregroundStyle(Color(red: 0.25, green: 0.18, blue: 0.5))
-                                .padding(.horizontal, 14).padding(.vertical, 8).background(.white).clipShape(Capsule())
+                            Label("Preview card", systemImage: "eye.fill").font(.caption.weight(.bold)).foregroundStyle(Color(red: 0.76, green: 0.84, blue: 0.76))
+                                .padding(.horizontal, 14).padding(.vertical, 8).background(Color(red: 1.0, green: 0.995, blue: 0.97)).clipShape(Capsule())
+                                .overlay(Capsule().stroke(Color(red: 0.76, green: 0.84, blue: 0.76).opacity(0.5)))
                         }
                     }.padding(.horizontal, 20)
                 }
@@ -989,8 +1158,9 @@ struct DashboardView: View {
 
                 Button { store.phase = .welcome } label: {
                     Text("Replay 3-minute journey ↺").font(.headline)
-                        .foregroundStyle(Color(red: 0.25, green: 0.18, blue: 0.5))
-                        .frame(maxWidth: .infinity).padding().background(.white).clipShape(RoundedRectangle(cornerRadius: 20))
+                        .foregroundStyle(Color(red: 0.76, green: 0.84, blue: 0.76))
+                        .frame(maxWidth: .infinity).padding().background(Color(red: 1.0, green: 0.995, blue: 0.97)).clipShape(RoundedRectangle(cornerRadius: 20))
+                        .overlay(RoundedRectangle(cornerRadius: 20).stroke(Color(red: 0.76, green: 0.84, blue: 0.76).opacity(0.5)))
                 }.padding(20)
             }.padding(.bottom, 20)
         }
@@ -1003,30 +1173,30 @@ struct GardenPondView: View {
     @Environment(\.accessibilityReduceMotion) var reduceMotion
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 24).fill(.white.opacity(0.12))
+            RoundedRectangle(cornerRadius: 24).fill(Color(red: 1.0, green: 0.995, blue: 0.97))
             VStack(spacing: 8) {
-                Text(name.isEmpty ? "Ripple Garden 🌱" : "\(name)'s Garden 🌱").font(.headline).foregroundStyle(.white)
+                Text(name.isEmpty ? "Ripple Garden 🌱" : "\(name)'s Garden 🌱").font(.headline).foregroundStyle(Color(red: 0.30, green: 0.27, blue: 0.22))
                 ZStack {
                     ForEach(0..<5, id: \.self) { i in
-                        Circle().stroke(.white.opacity(0.2), lineWidth: 1)
+                        Circle().stroke(Color(red: 0.90, green: 0.87, blue: 0.82).opacity(0.4), lineWidth: 1)
                             .frame(width: 60 + CGFloat(i) * 28, height: 60 + CGFloat(i) * 28)
                     }
                     // Lilies bloom with points
                     ForEach(0..<Int(2 + bloom * 8), id: \.self) { i in
-                        Circle().fill(Color.green.opacity(0.5 + 0.4 * bloom))
+                        Circle().fill(Color(red: 0.76, green: 0.84, blue: 0.76).opacity(0.5 + 0.4 * bloom))
                             .frame(width: 14 + 10 * bloom, height: 14 + 10 * bloom)
                             .offset(x: cos(Double(i) * 2.1) * (30 + 40 * bloom), y: sin(Double(i) * 2.1) * (24 + 30 * bloom))
                     }
                     Image(systemName: bloom > 0.6 ? "face.smiling.fill" : bloom > 0.2 ? "leaf.fill" : "circle.dotted")
-                        .font(.system(size: 44)).foregroundStyle(.white, .yellow)
-                        .shadow(color: .yellow.opacity(0.5 * bloom), radius: 16)
+                        .font(.system(size: 44)).foregroundStyle(Color(red: 0.30, green: 0.27, blue: 0.22), Color(red: 0.93, green: 0.80, blue: 0.58))
+                        .shadow(color: Color(red: 0.93, green: 0.80, blue: 0.58).opacity(0.5 * bloom), radius: 16)
                 }
                 .frame(height: 170)
                 Text(bloom < 0.2 ? "Plant your first seed — log a kindness." : bloom < 0.6 ? "Sprouting! Keep the streak warm." : "Blooming ocean of kindness 🌊")
-                    .font(.caption).foregroundStyle(.white.opacity(0.85))
+                    .font(.caption).foregroundStyle(Color(red: 0.65, green: 0.60, blue: 0.55))
             }.padding(16)
         }
-        .overlay(RoundedRectangle(cornerRadius: 24).stroke(.white.opacity(0.25)))
+        .overlay(RoundedRectangle(cornerRadius: 24).stroke(Color(red: 0.90, green: 0.87, blue: 0.82).opacity(0.5)))
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Ripple garden, bloom \(Int(bloom * 100)) percent")
     }
@@ -1056,9 +1226,9 @@ struct RipplePondView: View {
                 let r: CGFloat = 70
                 let px = center.x + cos(angle) * r
                 let py = center.y + sin(angle) * r
-                let color: Color = act.energy == .bright ? .yellow : act.energy == .okay ? .orange : .pink
+                let color: Color = act.energy == .bright ? Color(red: 0.93, green: 0.80, blue: 0.58) : act.energy == .okay ? Color(red: 0.91, green: 0.62, blue: 0.52) : Color(red: 0.92, green: 0.72, blue: 0.75)
                 context.fill(Path(ellipseIn: CGRect(x: px - 11, y: py - 11, width: 22, height: 22)), with: .color(color))
-                context.fill(Path(ellipseIn: CGRect(x: px - 6, y: py - 6, width: 12, height: 12)), with: .color(.white))
+                context.fill(Path(ellipseIn: CGRect(x: px - 6, y: py - 6, width: 12, height: 12)), with: .color(Color(red: 1.0, green: 0.995, blue: 0.97)))
             }
         }
         .frame(height: 260)
@@ -1083,8 +1253,8 @@ struct PencilCanvas: UIViewRepresentable {
     @Binding var canvas: PKCanvasView
     func makeUIView(context: Context) -> PKCanvasView {
         canvas.drawingPolicy = .anyInput
-        canvas.backgroundColor = UIColor(white: 1, alpha: 0.9)
-        canvas.tool = PKInkingTool(.marker, color: UIColor.systemPink, width: 12)
+        canvas.backgroundColor = UIColor(white: 0.99, alpha: 0.95)
+        canvas.tool = PKInkingTool(.marker, color: UIColor(red: 0.91, green: 0.62, blue: 0.52, alpha: 1), width: 12)
         return canvas
     }
     func updateUIView(_ uiView: PKCanvasView, context: Context) {}
@@ -1096,11 +1266,13 @@ struct ThankYouSheet: View {
     @Environment(\.dismiss) var dismiss
     var body: some View {
         VStack(spacing: 16) {
-            Text("💛 Thank you, \(name.isEmpty ? "kind human" : name)!").font(.title.weight(.heavy)).multilineTextAlignment(.center)
+            Text("💛 Thank you, \(name.isEmpty ? "kind human" : name)!").font(.title.weight(.heavy)).foregroundStyle(Color(red: 0.30, green: 0.27, blue: 0.22)).multilineTextAlignment(.center)
             Text("Your \(total) ripple points prove small acts compound. Screenshot and AirDrop this card — no internet needed to spread warmth.")
-                .multilineTextAlignment(.center).foregroundStyle(.secondary).padding(.horizontal)
+                .multilineTextAlignment(.center).foregroundStyle(Color(red: 0.65, green: 0.60, blue: 0.55)).padding(.horizontal)
             Button("Done") { dismiss() }.buttonStyle(.borderedProminent)
+                .tint(Color(red: 0.76, green: 0.84, blue: 0.76))
         }.padding(28)
+        .background(Color(red: 1.0, green: 0.995, blue: 0.97))
     }
 }
 
@@ -1112,10 +1284,11 @@ struct StatCard: View {
     var body: some View {
         VStack(spacing: 6) {
             Image(systemName: icon).foregroundStyle(color).font(.title3).accessibilityHidden(true)
-            Text(value).font(.system(.title2, design: .rounded).weight(.heavy))
-            Text(label).font(.caption).foregroundStyle(.secondary)
+            Text(value).font(.system(.title2, design: .rounded).weight(.heavy)).foregroundStyle(Color(red: 0.30, green: 0.27, blue: 0.22))
+            Text(label).font(.caption).foregroundStyle(Color(red: 0.65, green: 0.60, blue: 0.55))
         }
-        .frame(maxWidth: .infinity).padding(14).background(.white).clipShape(RoundedRectangle(cornerRadius: 20))
+        .frame(maxWidth: .infinity).padding(14).background(Color(red: 1.0, green: 0.995, blue: 0.97)).clipShape(RoundedRectangle(cornerRadius: 20))
+        .overlay(RoundedRectangle(cornerRadius: 20).stroke(Color(red: 0.90, green: 0.87, blue: 0.82).opacity(0.4)))
         .accessibilityElement(children: .combine).accessibilityLabel("\(value) \(label)")
     }
 }

@@ -16,7 +16,9 @@ let package = Package(
         .executableTarget(
             name: "AppModule",
             path: ".",
-            exclude: ["Watch"]
+            resources: [
+                .process("Resources/calm.mp3")
+            ]
         )
     ]
 )
