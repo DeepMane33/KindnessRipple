@@ -153,6 +153,106 @@ struct GratitudeEntry: Identifiable, Codable {
     var date: Date = Date()
 }
 
+// MARK: - Deed Analysis (positive scoring, zero for harm)
+
+enum DeedCategory: String, CaseIterable, Codable {
+    case small = "Small help"
+    case medium = "Thoughtful help"
+    case big = "Big kindness"
+    case none = "Not a kind deed"
+
+    var points: Int {
+        switch self {
+        case .small: return 15
+        case .medium: return 30
+        case .big: return 50
+        case .none: return 0
+        }
+    }
+    var color: Color {
+        switch self {
+        case .small: return Theme.success
+        case .medium: return Theme.accent
+        case .big: return Theme.warm
+        case .none: return Theme.cardBorder
+        }
+    }
+}
+
+struct DeedAnalysis: Identifiable, Codable {
+    var id = UUID()
+    var category: DeedCategory
+    var score: Int
+    var message: String
+    var suggestion: String
+    var isPositive: Bool
+    var needsApology: Bool = false
+}
+
+func analyzeDeed(_ text: String) -> DeedAnalysis {
+    let t = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    guard !t.isEmpty else {
+        return DeedAnalysis(
+            category: .none, score: 0,
+            message: "Write something to see your ripple score.",
+            suggestion: "Try: “I held the door for someone today.”",
+            isPositive: false
+        )
+    }
+
+    // Harmful words → score 0, suggest apology (gentle, positive framing)
+    let harmWords = ["hurt", "mean", "rude", "insult", "yell", "shout", "bad", "wrong", "ignore", "exclude"]
+    let isHarmful = harmWords.contains { t.contains($0) }
+    if isHarmful {
+        return DeedAnalysis(
+            category: .none, score: 0,
+            message: "This sounds like it may have caused hurt.",
+            suggestion: "Saying “I’m sorry” can heal it. Want to try again with something kind?",
+            isPositive: false,
+            needsApology: true
+        )
+    }
+
+    // Big kindness signals
+    let bigWords = ["help", "rescue", "saved", "stood up", "defended", "donated", "volunteered", "cooked", "caregiver", "nurse", "teacher"]
+    // Medium signals
+    let medWords = ["thank", "compliment", "smile", "door", "seat", "litter", "comment", "text", "call", "wave", "note", "listened", "shared"]
+    // Small signals
+    let smallWords = ["hello", "hi", "hey", "good morning", "good night", "please", "sorry", "patience"]
+
+    let hasBig = bigWords.contains { t.contains($0) }
+    let hasMed = medWords.contains { t.contains($0) }
+    let hasSmall = smallWords.contains { t.contains($0) }
+
+    let category: DeedCategory
+    let message: String
+    let suggestion: String
+
+    if hasBig {
+        category = .big
+        message = "Big kindness! This made a real difference."
+        suggestion = "Keep this warmth going — one big act a week is wonderful."
+    } else if hasMed {
+        category = .medium
+        message = "Thoughtful help. Your care is seen."
+        suggestion = "Small thoughtful acts add up to a big ripple."
+    } else if hasSmall {
+        category = .small
+        message = "Small help, big heart."
+        suggestion = "Even a “hello” can brighten someone’s whole day."
+    } else {
+        category = .none
+        message = "Try describing what you did and how it helped someone."
+        suggestion = "Try: “I helped a classmate with their bag.”"
+    }
+
+    return DeedAnalysis(
+        category: category, score: category.points,
+        message: message, suggestion: suggestion,
+        isPositive: true
+    )
+}
+
 enum AppPhase: Int, CaseIterable {
     case welcome, generator, action, dashboard
     var headline: String {
@@ -279,6 +379,11 @@ final class RippleStore {
     var microWinCompleted: Bool = false
     var gratitudeEntries: [GratitudeEntry] = []
     var todayGratitude: String = ""
+
+    // Deed analysis
+    var deedAnalysis: DeedAnalysis?
+    var showingDeedResult: Bool = false
+    var hasApologized: Bool = false
 
     // Background music
     var isMusicPlaying: Bool = false
@@ -420,14 +525,37 @@ final class RippleStore {
         keywords = extractKeywords(reflection)
     }
     func logCurrentAct() {
-        let pts = max(10, Int(20 + sentiment * 40) + currentChallenge.ripplePoints / 2)
+        let analysis = analyzeDeed(reflection)
+        deedAnalysis = analysis
+
+        if analysis.needsApology {
+            showingDeedResult = true
+            return
+        }
+
+        let pts = analysis.score > 0 ? analysis.score : max(10, Int(20 + sentiment * 40) + currentChallenge.ripplePoints / 2)
         acts.append(KindAct(title: currentChallenge.title, place: selectedPlace, energy: selectedEnergy, reflection: reflection, sentiment: sentiment, keywords: keywords, date: Date(), points: pts, minutes: currentChallenge.minutes))
         reflection = ""; sentiment = 0; keywords = []
+        deedAnalysis = nil
+        showingDeedResult = false
+        hasApologized = false
         refreshChallenge()
         save()
         endRippleActivity()
         requestHealthAuthorization()
         saveMindfulSession(minutes: currentChallenge.minutes)
+    }
+
+    func markApologized() {
+        hasApologized = true
+        showingDeedResult = false
+        deedAnalysis = nil
+        save()
+    }
+
+    func skipCurrentChallenge() {
+        refreshChallenge()
+        save()
     }
     func simulateJudgeExperience() {
         let cal = Calendar.current
@@ -880,6 +1008,15 @@ struct GeneratorView: View {
                                 .clipShape(RoundedRectangle(cornerRadius: 18))
                                 .shadow(color: Theme.warm.opacity(0.3), radius: 10, y: 5)
                         }
+                        Button { store.skipCurrentChallenge() } label: {
+                            Label("Skip", systemImage: "arrow.uturn.forward.circle")
+                                .font(.headline).foregroundStyle(Theme.warm)
+                                .frame(maxWidth: .infinity).padding(.vertical, 14)
+                                .background(Theme.card)
+                                .clipShape(RoundedRectangle(cornerRadius: 18))
+                                .overlay(RoundedRectangle(cornerRadius: 18).stroke(Theme.warm.opacity(0.5), lineWidth: 1.5))
+                        }
+                        .accessibilityLabel("Skip this challenge")
                         Button { store.refreshChallenge() } label: {
                             Image(systemName: "arrow.triangle.2.circlepath")
                                 .font(.title2).foregroundStyle(Theme.ink)
@@ -888,7 +1025,7 @@ struct GeneratorView: View {
                                 .clipShape(Circle())
                                 .overlay(Circle().stroke(Theme.cardBorder, lineWidth: 1))
                         }
-                        .accessibilityLabel("New challenge")
+                        .accessibilityLabel("Suggest another challenge")
                     }
                 }
                 .padding(20)
@@ -1049,11 +1186,44 @@ struct ActionView: View {
                     .padding(14).background(Theme.card).clipShape(RoundedRectangle(cornerRadius: 16))
                     .overlay(RoundedRectangle(cornerRadius: 16).stroke(Theme.cardBorder.opacity(0.5)))
 
+                    // Deed analysis result (shows before logging)
+                    if let analysis = store.deedAnalysis {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(spacing: 8) {
+                                Image(systemName: analysis.isPositive ? "checkmark.circle.fill" : "hand.raised.fill")
+                                    .font(.subheadline.weight(.bold))
+                                    .foregroundStyle(analysis.isPositive ? Theme.success : Theme.cardBorder)
+                                Text(analysis.category.rawValue)
+                                    .font(.caption.weight(.bold))
+                                    .foregroundStyle(analysis.color)
+                            }
+                            Text(analysis.message)
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(Theme.ink)
+                            Text(analysis.suggestion)
+                                .font(.caption)
+                                .foregroundStyle(Theme.inkSoft)
+                                .padding(8)
+                                .background(Theme.highlight)
+                                .clipShape(RoundedRectangle(cornerRadius: 10))
+                            if analysis.needsApology {
+                                Button("I said sorry 💛") { store.markApologized() }
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.white)
+                                    .frame(maxWidth: .infinity).padding(.vertical, 10)
+                                    .background(Theme.warm)
+                                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                            }
+                        }
+                        .padding(14).background(Theme.card).clipShape(RoundedRectangle(cornerRadius: 16))
+                        .overlay(RoundedRectangle(cornerRadius: 16).stroke(Theme.cardBorder.opacity(0.5)))
+                    }
+
                     Button {
                         store.logCurrentAct()
-                        store.phase = .dashboard
+                        if store.deedAnalysis == nil { store.phase = .dashboard }
                     } label: {
-                        Label("Complete ripple • Feel awesome", systemImage: "heart.fill")
+                        Label(store.deedAnalysis == nil ? "Complete ripple • Feel awesome" : "Log this deed", systemImage: "heart.fill")
                             .font(.headline).foregroundStyle(.white).frame(maxWidth: .infinity).padding(.vertical, 14)
                             .background(buttonFill(disabled: store.reflection.trimmingCharacters(in: .whitespaces).isEmpty))
                             .clipShape(RoundedRectangle(cornerRadius: 18))
